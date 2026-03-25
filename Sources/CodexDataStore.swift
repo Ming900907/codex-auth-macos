@@ -26,15 +26,53 @@ struct AccountSummary: Identifiable, Equatable {
     }
 }
 
-struct UsageSnapshot: Equatable {
+struct UsageSnapshot: Codable, Equatable {
     let primary: UsageWindow?
     let secondary: UsageWindow?
 }
 
-struct UsageWindow: Equatable {
+struct UsageWindow: Codable, Equatable {
     let usedPercent: Int
     let remainingPercent: Int
     let resetAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case remainingPercent = "remaining_percent"
+        case resetAt = "reset_at"
+        case resetsAt = "resets_at"
+    }
+
+    init(usedPercent: Int, remainingPercent: Int, resetAt: Date?) {
+        self.usedPercent = usedPercent
+        self.remainingPercent = remainingPercent
+        self.resetAt = resetAt
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        usedPercent = try Self.decodeInt(from: container, forKey: .usedPercent)
+        if let remainingPercent = try container.decodeIfPresent(Int.self, forKey: .remainingPercent) {
+            self.remainingPercent = remainingPercent
+        } else {
+            self.remainingPercent = max(0, 100 - usedPercent)
+        }
+
+        if let resetTimestamp = try container.decodeIfPresent(Int.self, forKey: .resetAt)
+            ?? container.decodeIfPresent(Int.self, forKey: .resetsAt) {
+            resetAt = Date(timeIntervalSince1970: TimeInterval(resetTimestamp))
+        } else {
+            resetAt = nil
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(usedPercent, forKey: .usedPercent)
+        try container.encode(remainingPercent, forKey: .remainingPercent)
+        try container.encodeIfPresent(resetAt.map { Int($0.timeIntervalSince1970) }, forKey: .resetAt)
+        try container.encodeIfPresent(resetAt.map { Int($0.timeIntervalSince1970) }, forKey: .resetsAt)
+    }
 
     var resetText: String {
         guard let resetAt else { return "重置时间未知" }
@@ -47,6 +85,24 @@ struct UsageWindow: Equatable {
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return formatter
     }()
+
+    private static func decodeInt(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) throws -> Int {
+        if let intValue = try container.decodeIfPresent(Int.self, forKey: key) {
+            return intValue
+        }
+
+        if let doubleValue = try container.decodeIfPresent(Double.self, forKey: key) {
+            return Int(doubleValue.rounded())
+        }
+
+        throw DecodingError.keyNotFound(
+            key,
+            .init(codingPath: container.codingPath, debugDescription: "Missing integer value for \(key.stringValue)")
+        )
+    }
 }
 
 struct CodexPaths {
@@ -94,8 +150,15 @@ enum CodexStoreError: LocalizedError {
 }
 
 final class CodexDataStore {
+    typealias DataReader = (URL) throws -> Data
+    typealias SleepAction = (TimeInterval) -> Void
+
     private let paths: CodexPaths
     private let fileManager: FileManager
+    private let readData: DataReader
+    private let sleepAction: SleepAction
+    private let registryReadRetryCount: Int
+    private let registryReadRetryDelay: TimeInterval
     private let decoder = JSONDecoder()
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -103,13 +166,25 @@ final class CodexDataStore {
         return encoder
     }()
 
-    init(paths: CodexPaths = CodexPaths(), fileManager: FileManager = .default) {
+    init(
+        paths: CodexPaths = CodexPaths(),
+        fileManager: FileManager = .default,
+        readData: @escaping DataReader = { try Data(contentsOf: $0) },
+        sleepAction: @escaping SleepAction = { Thread.sleep(forTimeInterval: $0) },
+        registryReadRetryCount: Int = 3,
+        registryReadRetryDelay: TimeInterval = 0.05
+    ) {
         self.paths = paths
         self.fileManager = fileManager
+        self.readData = readData
+        self.sleepAction = sleepAction
+        self.registryReadRetryCount = registryReadRetryCount
+        self.registryReadRetryDelay = registryReadRetryDelay
     }
 
     func loadSnapshot() throws -> AppSnapshot {
-        let registry = try loadRegistry()
+        var registry = try loadRegistry()
+        let usage = try resolveUsage(registry: &registry)
         let accounts = registry.accounts.map { account in
             AccountSummary(
                 id: account.accountKey,
@@ -121,7 +196,6 @@ final class CodexDataStore {
             )
         }
         let activeAccount = accounts.first(where: \.isActive)
-        let usage = try loadLatestUsage()
         return AppSnapshot(accounts: accounts, activeAccount: activeAccount, usage: usage)
     }
 
@@ -150,14 +224,62 @@ final class CodexDataStore {
     }
 
     func loadRegistry() throws -> RegistryFile {
-        guard fileManager.fileExists(atPath: paths.registryFile.path) else {
-            throw CodexStoreError.missingRegistry
+        let attempts = max(1, registryReadRetryCount)
+
+        for attempt in 0..<attempts {
+            do {
+                let data = try readData(paths.registryFile)
+                return try decoder.decode(RegistryFile.self, from: data)
+            } catch {
+                guard isMissingFileError(error) else {
+                    throw error
+                }
+
+                if attempt == attempts - 1 {
+                    throw CodexStoreError.missingRegistry
+                }
+
+                sleepAction(registryReadRetryDelay)
+            }
         }
-        let data = try Data(contentsOf: paths.registryFile)
-        return try decoder.decode(RegistryFile.self, from: data)
+
+        throw CodexStoreError.missingRegistry
     }
 
     func loadLatestUsage() throws -> UsageSnapshot? {
+        try loadLatestUsageRecord()?.snapshot
+    }
+
+    private func resolveUsage(registry: inout RegistryFile) throws -> UsageSnapshot? {
+        guard let activeIndex = registry.accounts.firstIndex(where: { $0.accountKey == registry.activeAccountKey }) else {
+            return nil
+        }
+
+        if let latestUsage = try loadLatestUsageRecord(),
+           shouldUseLatestUsage(latestUsage, for: registry) {
+            let account = registry.accounts[activeIndex]
+            let rollout = account.lastLocalRollout
+            if account.lastUsage != latestUsage.snapshot || account.lastUsageAt != latestUsage.timestamp {
+                registry.accounts[activeIndex].lastUsage = latestUsage.snapshot
+                registry.accounts[activeIndex].lastUsageAt = latestUsage.timestamp
+                registry.accounts[activeIndex].lastLocalRollout = rollout
+                let registryData = try encoder.encode(registry)
+                try writeAtomically(data: registryData, to: paths.registryFile)
+            }
+            return latestUsage.snapshot
+        }
+
+        return registry.accounts[activeIndex].lastUsage
+    }
+
+    private func shouldUseLatestUsage(_ usage: UsageRecord, for registry: RegistryFile) -> Bool {
+        guard let activatedAtMS = registry.activeAccountActivatedAtMS else {
+            return true
+        }
+        return usage.modifiedAt.timeIntervalSince1970 * 1000 >= TimeInterval(activatedAtMS)
+    }
+
+    private func loadLatestUsageRecord() throws -> UsageRecord? {
         guard fileManager.fileExists(atPath: paths.sessionsDirectory.path) else {
             return nil
         }
@@ -182,9 +304,13 @@ final class CodexDataStore {
                 if let event = try? decoder.decode(SessionEvent.self, from: data),
                    event.type == "event_msg",
                    event.payload.type == "token_count" {
-                    return UsageSnapshot(
-                        primary: UsageWindow(event.payload.rateLimits?.primary),
-                        secondary: UsageWindow(event.payload.rateLimits?.secondary)
+                    return UsageRecord(
+                        snapshot: UsageSnapshot(
+                            primary: UsageWindow(event.payload.rateLimits?.primary),
+                            secondary: UsageWindow(event.payload.rateLimits?.secondary)
+                        ),
+                        modifiedAt: candidate.modifiedAt,
+                        timestamp: Int(candidate.modifiedAt.timeIntervalSince1970)
                     )
                 }
             }
@@ -203,6 +329,19 @@ final class CodexDataStore {
             try fileManager.moveItem(at: tempURL, to: destination)
         }
     }
+}
+
+private func isMissingFileError(_ error: Error) -> Bool {
+    guard let cocoaError = error as? CocoaError else {
+        return false
+    }
+    return cocoaError.code == .fileReadNoSuchFile
+}
+
+private struct UsageRecord {
+    let snapshot: UsageSnapshot
+    let modifiedAt: Date
+    let timestamp: Int
 }
 
 private extension UsageWindow {
@@ -251,6 +390,9 @@ struct RegistryAccount: Codable {
     let authMode: String
     let createdAt: Int?
     var lastUsedAt: Int?
+    var lastUsage: UsageSnapshot?
+    var lastUsageAt: Int?
+    var lastLocalRollout: String?
 
     enum CodingKeys: String, CodingKey {
         case accountKey = "account_key"
@@ -262,6 +404,9 @@ struct RegistryAccount: Codable {
         case authMode = "auth_mode"
         case createdAt = "created_at"
         case lastUsedAt = "last_used_at"
+        case lastUsage = "last_usage"
+        case lastUsageAt = "last_usage_at"
+        case lastLocalRollout = "last_local_rollout"
     }
 }
 

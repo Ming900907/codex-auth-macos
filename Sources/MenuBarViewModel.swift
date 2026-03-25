@@ -7,27 +7,69 @@ final class MenuBarViewModel: ObservableObject {
         case automatic
     }
 
+    typealias SleepAction = @Sendable (UInt64) async -> Void
+
     @Published private(set) var state = AppState.loading
     @Published private(set) var isSwitching = false
     @Published private(set) var isLoggingIn = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var statusMessage: String?
 
-    private let store: CodexDataStore
-    private let loginRunner: CodexLoginCommandRunner
+    private let loadSnapshotAction: () throws -> AppSnapshot
+    private let switchAccountAction: (String) throws -> Void
+    private let runLoginAction: () async throws -> Void
+    private let cancelLoginAction: () -> Void
     private let autoRefreshIntervalNanoseconds: UInt64
+    private let loginRefreshRetryCount: Int
+    private let loginRefreshRetryIntervalNanoseconds: UInt64
+    private let sleepAction: SleepAction
     private var autoRefreshTask: Task<Void, Never>?
     private var loginTask: Task<Void, Never>?
     private var loginAttemptID: UUID?
+    private var clearsStatusMessageAfterNextRefresh = false
 
     init(
         store: CodexDataStore = CodexDataStore(),
         loginRunner: CodexLoginCommandRunner = CodexLoginCommandRunner(),
-        autoRefreshIntervalNanoseconds: UInt64 = 300_000_000_000
+        autoRefreshIntervalNanoseconds: UInt64 = 300_000_000_000,
+        loginRefreshRetryCount: Int = 6,
+        loginRefreshRetryIntervalNanoseconds: UInt64 = 500_000_000,
+        sleepAction: @escaping SleepAction = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        }
     ) {
-        self.store = store
-        self.loginRunner = loginRunner
+        loadSnapshotAction = { try store.loadSnapshot() }
+        switchAccountAction = { accountKey in try store.switchAccount(accountKey: accountKey) }
+        runLoginAction = { try await loginRunner.runLogin() }
+        cancelLoginAction = { loginRunner.cancelLogin() }
         self.autoRefreshIntervalNanoseconds = autoRefreshIntervalNanoseconds
+        self.loginRefreshRetryCount = loginRefreshRetryCount
+        self.loginRefreshRetryIntervalNanoseconds = loginRefreshRetryIntervalNanoseconds
+        self.sleepAction = sleepAction
+        refresh(trigger: .manual)
+        startAutoRefresh()
+    }
+
+    init(
+        loadSnapshotAction: @escaping () throws -> AppSnapshot,
+        switchAccountAction: @escaping (String) throws -> Void,
+        runLoginAction: @escaping () async throws -> Void,
+        cancelLoginAction: @escaping () -> Void,
+        autoRefreshIntervalNanoseconds: UInt64 = 300_000_000_000,
+        loginRefreshRetryCount: Int = 6,
+        loginRefreshRetryIntervalNanoseconds: UInt64 = 500_000_000,
+        sleepAction: @escaping SleepAction = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        }
+    ) {
+        self.loadSnapshotAction = loadSnapshotAction
+        self.switchAccountAction = switchAccountAction
+        self.runLoginAction = runLoginAction
+        self.cancelLoginAction = cancelLoginAction
+        self.autoRefreshIntervalNanoseconds = autoRefreshIntervalNanoseconds
+        self.loginRefreshRetryCount = loginRefreshRetryCount
+        self.loginRefreshRetryIntervalNanoseconds = loginRefreshRetryIntervalNanoseconds
+        self.sleepAction = sleepAction
         refresh(trigger: .manual)
         startAutoRefresh()
     }
@@ -66,11 +108,19 @@ final class MenuBarViewModel: ObservableObject {
 
         Task {
             do {
-                let snapshot = try store.loadSnapshot()
+                let snapshot = try loadSnapshotAction()
                 state = .loaded(snapshot)
+                if clearsStatusMessageAfterNextRefresh {
+                    statusMessage = nil
+                    clearsStatusMessageAfterNextRefresh = false
+                }
             } catch {
                 state = .failed
                 errorMessage = error.localizedDescription
+                if clearsStatusMessageAfterNextRefresh {
+                    statusMessage = nil
+                    clearsStatusMessageAfterNextRefresh = false
+                }
             }
         }
     }
@@ -85,8 +135,8 @@ final class MenuBarViewModel: ObservableObject {
             defer { isSwitching = false }
 
             do {
-                try store.switchAccount(accountKey: accountKey)
-                let snapshot = try store.loadSnapshot()
+                try switchAccountAction(accountKey)
+                let snapshot = try loadSnapshotAction()
                 state = .loaded(snapshot)
             } catch {
                 errorMessage = error.localizedDescription
@@ -107,16 +157,19 @@ final class MenuBarViewModel: ObservableObject {
             guard let self else { return }
 
             do {
-                try await loginRunner.runLogin()
+                try await runLoginAction()
                 guard loginAttemptID == attemptID else { return }
+                let baselineAccountKeys = currentAccountKeys()
                 isLoggingIn = false
                 loginAttemptID = nil
+                clearsStatusMessageAfterNextRefresh = true
                 statusMessage = "登录完成，正在刷新账号列表"
-                refresh(trigger: .manual)
+                await refreshAfterLogin(baselineAccountKeys: baselineAccountKeys)
             } catch {
                 guard loginAttemptID == attemptID else { return }
                 isLoggingIn = false
                 loginAttemptID = nil
+                clearsStatusMessageAfterNextRefresh = false
                 if let error = error as? CodexLoginError, error == .cancelled {
                     statusMessage = error.localizedDescription
                     errorMessage = nil
@@ -133,9 +186,10 @@ final class MenuBarViewModel: ObservableObject {
         loginAttemptID = nil
         loginTask?.cancel()
         loginTask = nil
-        loginRunner.cancelLogin()
+        cancelLoginAction()
         isLoggingIn = false
         errorMessage = nil
+        clearsStatusMessageAfterNextRefresh = false
         statusMessage = "已取消登录"
     }
 
@@ -154,6 +208,44 @@ final class MenuBarViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func refreshAfterLogin(baselineAccountKeys: Set<String>) async {
+        let attempts = max(1, loginRefreshRetryCount)
+
+        for attempt in 0..<attempts {
+            do {
+                let snapshot = try loadSnapshotAction()
+                state = .loaded(snapshot)
+
+                let refreshedAccountKeys = Set(snapshot.accounts.map(\.accountKey))
+                let shouldStop = refreshedAccountKeys != baselineAccountKeys || attempt == attempts - 1
+                if shouldStop {
+                    if clearsStatusMessageAfterNextRefresh {
+                        statusMessage = nil
+                        clearsStatusMessageAfterNextRefresh = false
+                    }
+                    return
+                }
+            } catch {
+                state = .failed
+                errorMessage = error.localizedDescription
+                if clearsStatusMessageAfterNextRefresh {
+                    statusMessage = nil
+                    clearsStatusMessageAfterNextRefresh = false
+                }
+                return
+            }
+
+            await sleepAction(loginRefreshRetryIntervalNanoseconds)
+        }
+    }
+
+    private func currentAccountKeys() -> Set<String> {
+        guard case .loaded(let snapshot) = state else {
+            return []
+        }
+        return Set(snapshot.accounts.map(\.accountKey))
     }
 }
 
