@@ -27,6 +27,12 @@ struct MenuBarContentView: View {
             header(snapshot: snapshot)
             usage(snapshot: snapshot)
             accounts(snapshot: snapshot)
+            if let statusMessage = viewModel.statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let errorMessage = viewModel.errorMessage {
                 Text(errorMessage)
                     .font(.caption)
@@ -117,7 +123,7 @@ struct MenuBarContentView: View {
                         Button(account.isActive ? "已激活" : "切换") {
                             viewModel.switchAccount(account.accountKey)
                         }
-                        .disabled(account.isActive || viewModel.isSwitching)
+                        .disabled(account.isActive || viewModel.isSwitching || viewModel.isLoggingIn)
                     }
                 }
             } else {
@@ -129,16 +135,30 @@ struct MenuBarContentView: View {
     }
 
     private var actions: some View {
-        HStack {
-            Button("刷新") {
-                viewModel.refresh()
+        VStack(alignment: .leading, spacing: 10) {
+            if viewModel.isLoggingIn {
+                Button("取消登录") {
+                    viewModel.cancelLogin()
+                }
+                .disabled(viewModel.isSwitching)
+            } else {
+                Button("登录新账号") {
+                    viewModel.loginNewAccount()
+                }
+                .disabled(viewModel.isSwitching)
             }
-            .disabled(viewModel.isSwitching)
 
-            Spacer()
+            HStack {
+                Button("刷新") {
+                    viewModel.refresh()
+                }
+                .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
 
-            Button("退出") {
-                NSApplication.shared.terminate(nil)
+                Spacer()
+
+                Button("退出") {
+                    NSApplication.shared.terminate(nil)
+                }
             }
         }
     }
