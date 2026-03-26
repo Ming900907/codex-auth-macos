@@ -3,163 +3,406 @@ import SwiftUI
 
 struct MenuBarContentView: View {
     @ObservedObject var viewModel: MenuBarViewModel
+    @State private var expandedAccountKey: String?
 
     var body: some View {
-        Group {
+        ZStack {
+            background
+
             switch viewModel.state {
             case .loading:
-                ProgressView("读取中...")
-                    .frame(width: 320)
-                    .padding()
-
+                loading
             case .failed:
                 content(snapshot: nil)
-
             case .loaded(let snapshot):
                 content(snapshot: snapshot)
+            }
+        }
+        .frame(width: 372)
+    }
+
+    private var background: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.08, green: 0.08, blue: 0.10),
+                    Color(red: 0.12, green: 0.12, blue: 0.15),
+                    Color(red: 0.08, green: 0.08, blue: 0.10)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Circle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 220, height: 220)
+                .blur(radius: 54)
+                .offset(x: 118, y: -118)
+
+            Circle()
+                .fill(Color.white.opacity(0.05))
+                .frame(width: 260, height: 260)
+                .blur(radius: 62)
+                .offset(x: -128, y: 144)
+        }
+    }
+
+    private var loading: some View {
+        mainCard {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading...")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.secondary.opacity(0.85))
+                Spacer(minLength: 0)
             }
         }
     }
 
     @ViewBuilder
     private func content(snapshot: AppSnapshot?) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header(snapshot: snapshot)
-            usage(snapshot: snapshot)
-            accounts(snapshot: snapshot)
-            if let statusMessage = viewModel.statusMessage {
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        ZStack {
+            mainCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    header(snapshot: snapshot)
+                    usageSection(snapshot: snapshot)
+                    accountsSection(snapshot: snapshot)
+                    statusSection
+                    actions
+                }
             }
-            if let errorMessage = viewModel.errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+
+            if viewModel.isRefreshing {
+                refreshOverlay
             }
-            actions
         }
-        .frame(width: 340)
-        .padding(16)
     }
 
     private func header(snapshot: AppSnapshot?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(snapshot?.activeAccount?.displayName ?? "未识别当前账号")
-                .font(.headline)
-            Text(snapshot?.activeAccount?.planLabel ?? "无套餐信息")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Text(snapshot?.activeAccount?.displayName ?? "Active account unavailable")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.96))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+
+            HStack(spacing: 8) {
+                Text(snapshot?.activeAccount?.planLabel ?? "No plan")
+                Text("•")
+                    .foregroundStyle(.secondary.opacity(0.85))
+                Text(snapshot?.activeAccount?.isActive == true ? "Active" : "No active account")
+            }
+            .font(.system(size: 10, weight: .regular))
+            .foregroundStyle(.secondary.opacity(0.88))
+            .lineLimit(1)
         }
     }
 
-    private func usage(snapshot: AppSnapshot?) -> some View {
+    private func usageSection(snapshot: AppSnapshot?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("当前额度")
-                .font(.subheadline.weight(.semibold))
-            usageRow(
-                title: "5h 剩余",
-                usage: snapshot?.usage?.primary,
-                emptyText: "暂无 5h 数据"
-            )
-            usageRow(
-                title: "周剩余",
-                usage: snapshot?.usage?.secondary,
-                emptyText: "暂无周数据"
-            )
-        }
-    }
+            sectionHeader("Usage")
 
-    private func usageRow(title: String, usage: UsageWindow?, emptyText: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            if let usage {
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(usage.remainingPercent)%")
-                        .monospacedDigit()
-                    Text(usage.resetText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+            if let usage = snapshot?.usage {
+                VStack(alignment: .leading, spacing: 8) {
+                    UsageMeterCard(title: "5h left", usage: usage.primary, emptyText: "No 5h data")
+                    UsageMeterCard(title: "Weekly left", usage: usage.secondary, emptyText: "No weekly data")
                 }
             } else {
-                Text(emptyText)
-                    .foregroundStyle(.secondary)
+                Text("No usage data available")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary.opacity(0.85))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .font(.system(size: 13))
     }
 
-    private func accounts(snapshot: AppSnapshot?) -> some View {
+    private func accountsSection(snapshot: AppSnapshot?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("本地账号")
-                .font(.subheadline.weight(.semibold))
+            sectionHeader("Accounts")
 
             if let accounts = snapshot?.accounts, !accounts.isEmpty {
-                ForEach(accounts) { account in
-                    HStack(alignment: .center, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(account.displayName)
-                                    .font(.system(size: 13, weight: account.isActive ? .semibold : .regular))
-                                if account.isActive {
-                                    Text("当前")
-                                        .font(.caption2)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color.accentColor.opacity(0.15))
-                                        .clipShape(Capsule())
-                                }
-                            }
-                            Text(account.planLabel)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(accounts) { account in
+                        if account.isActive {
+                            activeAccountRow(account)
+                        } else {
+                            inactiveAccountRow(account)
                         }
-
-                        Spacer()
-
-                        Button(account.isActive ? "已激活" : "切换") {
-                            viewModel.switchAccount(account.accountKey)
-                        }
-                        .disabled(account.isActive || viewModel.isSwitching || viewModel.isLoggingIn)
                     }
                 }
             } else {
-                Text("未找到本地账号")
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 13))
+                Text("No local accounts found")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary.opacity(0.85))
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
+    private func activeAccountRow(_ account: AccountSummary) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(account.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(account.planLabel)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.secondary.opacity(0.84))
+            }
+
+            Spacer(minLength: 0)
+
+            Text("Active")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.green.opacity(0.96))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.14), in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 1)
+    }
+
+    private func inactiveAccountRow(_ account: AccountSummary) -> some View {
+        let isExpanded = expandedAccountKey == account.accountKey
+
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                expandedAccountKey = isExpanded ? nil : account.accountKey
+            } label: {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(account.displayName)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.95))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        Text(account.planLabel)
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(.secondary.opacity(0.84))
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Text(account.usage != nil ? "Has history" : "No history")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.88))
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary.opacity(0.76))
+                        .frame(width: 12, height: 12)
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                        .animation(.easeInOut(duration: 0.16), value: isExpanded)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let usage = account.usage {
+                        VStack(alignment: .leading, spacing: 8) {
+                            UsageMeterCard(title: "5h left", usage: usage.primary, emptyText: "No 5h data")
+                            UsageMeterCard(title: "Weekly left", usage: usage.secondary, emptyText: "No weekly data")
+                        }
+                    } else {
+                        Text("No usage history for this account")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary.opacity(0.85))
+                    }
+
+                    Button("Switch to this account") {
+                        viewModel.switchAccount(account.accountKey)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var statusSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let statusMessage = viewModel.statusMessage {
+                Text(statusMessage)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.secondary.opacity(0.82))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let errorMessage = viewModel.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(Color.red.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var actions: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
             if viewModel.isLoggingIn {
-                Button("取消登录") {
+                Button("Cancel login") {
                     viewModel.cancelLogin()
                 }
                 .disabled(viewModel.isSwitching)
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary.opacity(0.85))
             } else {
-                Button("登录新账号") {
+                Button("Login new account") {
                     viewModel.loginNewAccount()
                 }
                 .disabled(viewModel.isSwitching)
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.95))
             }
 
-            HStack {
-                Button("刷新") {
-                    viewModel.refresh()
-                }
-                .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
+            Spacer(minLength: 0)
 
-                Spacer()
+            Button("Refresh") {
+                viewModel.refresh()
+            }
+            .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary.opacity(0.85))
 
-                Button("退出") {
-                    NSApplication.shared.terminate(nil)
+            Button("Quit") {
+                NSApplication.shared.terminate(nil)
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary.opacity(0.85))
+        }
+        .padding(.top, 2)
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary.opacity(0.8))
+            .textCase(.uppercase)
+            .tracking(0.5)
+    }
+
+    private func mainCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(14)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.20), radius: 18, x: 0, y: 10)
+    }
+
+    private var refreshOverlay: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color.black.opacity(0.28))
+            .overlay {
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                    Text("Refreshing...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.92))
                 }
             }
+            .allowsHitTesting(true)
+    }
+}
+
+private struct UsageMeterCard: View {
+    let title: String
+    let usage: UsageWindow?
+    let emptyText: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.82))
+
+                    Text(usage?.resetText ?? emptyText)
+                        .font(.system(size: 8, weight: .regular))
+                        .foregroundStyle(.secondary.opacity(0.78))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                }
+
+                Spacer(minLength: 0)
+
+                if let usage {
+                    Text("\(usage.remainingPercent)%")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(UsagePalette.color(for: usage.remainingPercent))
+                } else {
+                    Text("--")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary.opacity(0.82))
+                }
+            }
+
+            UsageBar(
+                progress: usage.map { Double($0.remainingPercent) / 100.0 },
+                tint: usage.map { UsagePalette.color(for: $0.remainingPercent) } ?? .secondary.opacity(0.55)
+            )
+        }
+        .padding(.vertical, 1)
+        .padding(.horizontal, 2)
+    }
+}
+
+private struct UsageBar: View {
+    let progress: Double?
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.10))
+
+                if let progress {
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [tint.opacity(0.96), tint.opacity(0.64)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: min(proxy.size.width * max(0, min(progress, 1)), 138))
+                }
+            }
+        }
+        .frame(height: 4)
+    }
+}
+
+private enum UsagePalette {
+    static func color(for remainingPercent: Int) -> Color {
+        switch remainingPercent {
+        case 67...100:
+            return Color(red: 0.44, green: 0.86, blue: 0.62)
+        case 34...66:
+            return Color(red: 0.96, green: 0.76, blue: 0.31)
+        default:
+            return Color(red: 0.96, green: 0.44, blue: 0.39)
         }
     }
 }

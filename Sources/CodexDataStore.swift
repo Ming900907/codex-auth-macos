@@ -13,6 +13,7 @@ struct AccountSummary: Identifiable, Equatable {
     let alias: String
     let plan: String
     let isActive: Bool
+    let usage: UsageSnapshot?
 
     var displayName: String {
         if !alias.isEmpty {
@@ -22,7 +23,7 @@ struct AccountSummary: Identifiable, Equatable {
     }
 
     var planLabel: String {
-        plan.isEmpty ? "未知套餐" : plan.uppercased()
+        plan.isEmpty ? "Unknown plan" : plan.uppercased()
     }
 }
 
@@ -75,14 +76,14 @@ struct UsageWindow: Codable, Equatable {
     }
 
     var resetText: String {
-        guard let resetAt else { return "重置时间未知" }
-        return "重置 \(Self.resetDateFormatter.string(from: resetAt))"
+        guard let resetAt else { return "Reset time unknown" }
+        return "Resets \(Self.resetDateFormatter.string(from: resetAt))"
     }
 
     private static let resetDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "MM/dd HH:mm"
         return formatter
     }()
 
@@ -138,13 +139,13 @@ enum CodexStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingRegistry:
-            return "缺少 registry.json"
+            return "Missing registry.json"
         case .missingAuthSnapshot(let key):
-            return "缺少账号快照：\(key)"
+            return "Missing account snapshot: \(key)"
         case .invalidActiveAccount:
-            return "当前账号信息无效"
+            return "Active account is invalid"
         case .invalidUsageData:
-            return "额度数据格式无效"
+            return "Usage data is invalid"
         }
     }
 }
@@ -192,7 +193,8 @@ final class CodexDataStore {
                 email: account.email,
                 alias: account.alias,
                 plan: account.plan,
-                isActive: account.accountKey == registry.activeAccountKey
+                isActive: account.accountKey == registry.activeAccountKey,
+                usage: account.lastUsage
             )
         }
         let activeAccount = accounts.first(where: \.isActive)

@@ -89,6 +89,44 @@ struct MenuBarViewModelTests {
             Issue.record("expected updated account list after login retry")
         }
     }
+
+    @Test
+    func manualRefreshShowsLoadingOverlayUntilSnapshotArrives() async {
+        let snapshot = makeSnapshot(accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
+        var loadSnapshotCallCount = 0
+        let viewModel = MenuBarViewModel(
+            loadSnapshotAction: {
+                defer { loadSnapshotCallCount += 1 }
+                if loadSnapshotCallCount >= 1 {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                return snapshot
+            },
+            switchAccountAction: { _ in },
+            runLoginAction: { () async throws in },
+            cancelLoginAction: {},
+            autoRefreshIntervalNanoseconds: 3_600_000_000_000,
+            loginRefreshRetryCount: 1,
+            loginRefreshRetryIntervalNanoseconds: 0,
+            sleepAction: { _ in }
+        )
+
+        await waitUntil { if case .loaded = viewModel.state { true } else { false } }
+
+        viewModel.refresh()
+
+        await waitUntil { viewModel.isRefreshing }
+        await waitUntil { !viewModel.isRefreshing }
+
+        #expect(loadSnapshotCallCount >= 2)
+
+        switch viewModel.state {
+        case .loaded(let loadedSnapshot):
+            #expect(loadedSnapshot.activeAccount?.accountKey == "user-a::acct-a")
+        case .loading, .failed:
+            Issue.record("expected loaded state after manual refresh")
+        }
+    }
 }
 
 private func makeSnapshot(accountKeys: [String], activeAccountKey: String) -> AppSnapshot {
@@ -99,7 +137,8 @@ private func makeSnapshot(accountKeys: [String], activeAccountKey: String) -> Ap
             email: "user\(index)@example.com",
             alias: "",
             plan: index == 0 ? "plus" : "team",
-            isActive: accountKey == activeAccountKey
+            isActive: accountKey == activeAccountKey,
+            usage: nil
         )
     }
 

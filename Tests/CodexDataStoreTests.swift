@@ -18,6 +18,18 @@ struct CodexDataStoreTests {
     }
 
     @Test
+    func loadSnapshotIncludesInactiveAccountUsageHistory() throws {
+        let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
+        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+
+        let snapshot = try store.loadSnapshot()
+        let inactiveAccount = try #require(snapshot.accounts.first(where: { !$0.isActive }))
+
+        #expect(inactiveAccount.usage?.primary?.remainingPercent == 77)
+        #expect(inactiveAccount.usage?.secondary?.remainingPercent == 95)
+    }
+
+    @Test
     func switchAccountReplacesAuthAndUpdatesRegistry() throws {
         let fixture = try Fixture.make()
         let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
@@ -68,7 +80,8 @@ struct CodexDataStoreTests {
             resetAt: Date(timeIntervalSince1970: 1774435835)
         )
 
-        #expect(usage.resetText.contains("2026-03-25"))
+        #expect(usage.resetText.hasPrefix("Resets "))
+        #expect(usage.resetText.contains("03/25"))
         #expect(usage.resetText.contains(":"))
     }
 

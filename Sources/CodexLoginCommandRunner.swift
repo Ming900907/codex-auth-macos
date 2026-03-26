@@ -9,11 +9,11 @@ enum CodexLoginError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .launchFailed(let message):
-            return "无法启动 codex login：\(message)"
+            return "Unable to launch codex login: \(message)"
         case .failed(let status):
-            return "codex login 失败，退出码 \(status)"
+            return "codex login failed with exit code \(status)"
         case .cancelled:
-            return "已取消登录"
+            return "Login cancelled"
         }
     }
 }

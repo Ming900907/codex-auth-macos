@@ -12,6 +12,7 @@ final class MenuBarViewModel: ObservableObject {
     @Published private(set) var state = AppState.loading
     @Published private(set) var isSwitching = false
     @Published private(set) var isLoggingIn = false
+    @Published private(set) var isRefreshing = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var statusMessage: String?
 
@@ -99,6 +100,14 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
 
+        let shouldShowRefreshOverlay: Bool
+        switch state {
+        case .loading:
+            shouldShowRefreshOverlay = false
+        case .loaded, .failed:
+            shouldShowRefreshOverlay = trigger == .manual
+        }
+
         errorMessage = nil
         if case .loaded = state {
             // Keep existing content while refreshing.
@@ -106,7 +115,15 @@ final class MenuBarViewModel: ObservableObject {
             state = .loading
         }
 
+        isRefreshing = shouldShowRefreshOverlay
+
         Task {
+            defer {
+                if shouldShowRefreshOverlay {
+                    isRefreshing = false
+                }
+            }
+
             do {
                 let snapshot = try loadSnapshotAction()
                 state = .loaded(snapshot)
@@ -148,7 +165,7 @@ final class MenuBarViewModel: ObservableObject {
         guard !isSwitching, !isLoggingIn else { return }
         isLoggingIn = true
         errorMessage = nil
-        statusMessage = "已启动 codex login，请在浏览器完成登录"
+        statusMessage = "codex login started. Finish sign-in in the browser."
 
         let attemptID = UUID()
         loginAttemptID = attemptID
@@ -163,7 +180,7 @@ final class MenuBarViewModel: ObservableObject {
                 isLoggingIn = false
                 loginAttemptID = nil
                 clearsStatusMessageAfterNextRefresh = true
-                statusMessage = "登录完成，正在刷新账号列表"
+                statusMessage = "Login finished. Refreshing accounts..."
                 await refreshAfterLogin(baselineAccountKeys: baselineAccountKeys)
             } catch {
                 guard loginAttemptID == attemptID else { return }
@@ -190,7 +207,7 @@ final class MenuBarViewModel: ObservableObject {
         isLoggingIn = false
         errorMessage = nil
         clearsStatusMessageAfterNextRefresh = false
-        statusMessage = "已取消登录"
+        statusMessage = "Login cancelled"
     }
 
     private func startAutoRefresh() {
