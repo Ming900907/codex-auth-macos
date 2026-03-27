@@ -101,6 +101,35 @@ struct CodexDataStoreTests {
     }
 
     @Test
+    func loadSnapshotSkipsDevelopmentSessionNoiseAndUsesOlderUsage() throws {
+        let fixture = try Fixture.make(includeUsage: false)
+        let olderSessionURL = fixture.paths.sessionsDirectory
+            .appendingPathComponent("older.jsonl")
+        let subagentSessionURL = fixture.paths.sessionsDirectory
+            .appendingPathComponent("subagent.jsonl")
+        let pollutedSessionURL = fixture.paths.sessionsDirectory
+            .appendingPathComponent("newer.jsonl")
+
+        try Data(Fixture.sessionDataDirect.utf8).write(to: olderSessionURL)
+        try Data(Fixture.subagentPollutedSessionData.utf8).write(to: subagentSessionURL)
+        try Data(Fixture.pollutedSessionData.utf8).write(to: pollutedSessionURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: olderSessionURL.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 200)], ofItemAtPath: subagentSessionURL.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 300)], ofItemAtPath: pollutedSessionURL.path)
+
+        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+
+        let snapshot = try store.loadSnapshot()
+        let registry = try store.loadRegistry()
+        let account = try #require(registry.accounts.first(where: { $0.accountKey == "user-a::acct-a" }))
+
+        #expect(snapshot.usage?.primary?.remainingPercent == 73)
+        #expect(snapshot.usage?.secondary?.remainingPercent == 89)
+        #expect(account.lastUsage?.primary?.remainingPercent == 73)
+        #expect(account.lastUsage?.secondary?.remainingPercent == 89)
+    }
+
+    @Test
     func loadSnapshotFallsBackToAccountHistoryWhenNoNewSessionUsage() throws {
         let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
         let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
@@ -338,11 +367,26 @@ private struct Fixture {
     }
     """.utf8)
 
-    private static let sessionDataDirect = """
+    static let sessionDataDirect = """
     {"timestamp":"2026-03-25T06:32:54.896Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":27.0,"resets_at":1774435835},"secondary":{"used_percent":11.0,"resets_at":1774937466}}}}
+    """
+
+    static let pollutedSessionData = """
+    {"timestamp":"2026-03-26T06:13:06.419Z","type":"session_meta","payload":{"cwd":"\(sourceRootPath)","originator":"codex_cli_rs","source":"cli"}}
+    {"timestamp":"2026-03-26T06:13:07.419Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":2.0,"resets_at":1774595191},"secondary":{"used_percent":1.0,"resets_at":1775181991}}}}
+    """
+
+    static let subagentPollutedSessionData = """
+    {"timestamp":"2026-03-26T15:47:54.000Z","type":"session_meta","payload":{"cwd":"\(sourceRootPath)","originator":"codex_cli_rs","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1,"agent_nickname":"Pauli","agent_role":"frontend-developer"}}},"agent_role":"frontend-developer"}}
+    {"timestamp":"2026-03-26T15:50:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":1.0,"resets_at":1774595191},"secondary":{"used_percent":1.0,"resets_at":1775181991}}}}
     """
 
     static let nestedInfoSessionData = """
     {"timestamp":"2026-03-25T06:32:54.896Z","type":"event_msg","payload":{"type":"token_count","info":{"rate_limits":{"primary":{"used_percent":36.0,"resets_at":1774435835},"secondary":{"used_percent":7.0,"resets_at":1774937466}}}}}
     """
+
+    static let sourceRootPath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .standardizedFileURL.path
 }

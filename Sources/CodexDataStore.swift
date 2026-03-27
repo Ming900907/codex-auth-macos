@@ -161,6 +161,10 @@ final class CodexDataStore {
     private let registryReadRetryCount: Int
     private let registryReadRetryDelay: TimeInterval
     private let decoder = JSONDecoder()
+    private let sourceRootPath = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .standardizedFileURL.path
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -299,8 +303,11 @@ final class CodexDataStore {
             files.append((url, values.contentModificationDate ?? .distantPast))
         }
 
-        for candidate in files.sorted(by: { $0.modifiedAt > $1.modifiedAt }).prefix(20) {
+        for candidate in files.sorted(by: { $0.modifiedAt > $1.modifiedAt }) {
             let content = try String(contentsOf: candidate.url, encoding: .utf8)
+            guard !shouldSkipSessionFile(content) else {
+                continue
+            }
             for line in content.split(separator: "\n").reversed() {
                 guard let data = line.data(using: .utf8) else { continue }
                 if let event = try? decoder.decode(SessionEvent.self, from: data),
@@ -319,6 +326,30 @@ final class CodexDataStore {
         }
 
         return nil
+    }
+
+    private func shouldSkipSessionFile(_ content: String) -> Bool {
+        guard let firstLine = content.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first,
+              let data = firstLine.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["payload"] as? [String: Any] else {
+            return false
+        }
+
+        if payload["agent_role"] != nil {
+            return true
+        }
+
+        if let source = payload["source"] as? [String: Any], source["subagent"] != nil {
+            return true
+        }
+
+        if let cwd = payload["cwd"] as? String,
+           URL(fileURLWithPath: cwd).standardizedFileURL.path.hasPrefix(sourceRootPath) {
+            return true
+        }
+
+        return false
     }
 
     private func writeAtomically(data: Data, to destination: URL) throws {
