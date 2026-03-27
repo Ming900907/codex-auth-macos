@@ -191,6 +191,10 @@ final class MenuBarViewModel: ObservableObject {
 
     func validateAccountAccess(_ accountKey: String) {
         guard !isSwitching, !isRemoving, !isLoggingIn else { return }
+        if case .loaded(let snapshot) = state,
+           snapshot.accounts.first(where: { $0.accountKey == accountKey })?.isAccessInvalid == true {
+            return
+        }
 
         Task {
             do {

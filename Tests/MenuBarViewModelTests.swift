@@ -255,6 +255,70 @@ struct MenuBarViewModelTests {
         #expect(validatedAccountKey == "user-b::acct-b")
         #expect(loadSnapshotCallCount >= 2)
     }
+
+    @Test
+    func validateInactiveAccountAccessSkipsAlreadyInvalidAccount() async {
+        let invalidSnapshot = AppSnapshot(
+            accounts: [
+                AccountSummary(
+                    id: "user-a::acct-a",
+                    accountKey: "user-a::acct-a",
+                    email: "user0@example.com",
+                    alias: "",
+                    plan: "plus",
+                    isActive: true,
+                    usage: nil,
+                    accessIssue: nil
+                ),
+                AccountSummary(
+                    id: "user-b::acct-b",
+                    accountKey: "user-b::acct-b",
+                    email: "user1@example.com",
+                    alias: "",
+                    plan: "team",
+                    isActive: false,
+                    usage: nil,
+                    accessIssue: "Account access invalid. Re-login required."
+                )
+            ],
+            activeAccount: AccountSummary(
+                id: "user-a::acct-a",
+                accountKey: "user-a::acct-a",
+                email: "user0@example.com",
+                alias: "",
+                plan: "plus",
+                isActive: true,
+                usage: nil,
+                accessIssue: nil
+            ),
+            usage: nil,
+            activeAccessIssue: nil
+        )
+        var validateCallCount = 0
+
+        let viewModel = MenuBarViewModel(
+            loadSnapshotAction: { invalidSnapshot },
+            switchAccountAction: { _ in },
+            removeAccountAction: { _ in },
+            validateAccountAccessAction: {
+                validateCallCount += 1
+            },
+            runLoginAction: { () async throws in },
+            cancelLoginAction: {},
+            autoRefreshIntervalNanoseconds: 3_600_000_000_000,
+            loginRefreshRetryCount: 1,
+            loginRefreshRetryIntervalNanoseconds: 0,
+            sleepAction: { _ in }
+        )
+
+        await waitUntil { if case .loaded = viewModel.state { true } else { false } }
+
+        viewModel.validateAccountAccess("user-b::acct-b")
+
+        try? await Task.sleep(nanoseconds: 20_000_000)
+
+        #expect(validateCallCount == 0)
+    }
 }
 
 private func makeSnapshot(accountKeys: [String], activeAccountKey: String) -> AppSnapshot {

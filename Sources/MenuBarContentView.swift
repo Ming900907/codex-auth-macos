@@ -203,7 +203,7 @@ struct MenuBarContentView: View {
             Button {
                 let nextExpandedKey = isExpanded ? nil : account.accountKey
                 expandedAccountKey = nextExpandedKey
-                if nextExpandedKey == account.accountKey {
+                if nextExpandedKey == account.accountKey, !account.isAccessInvalid {
                     viewModel.validateAccountAccess(account.accountKey)
                 }
             } label: {
@@ -221,16 +221,19 @@ struct MenuBarContentView: View {
 
                     Spacer(minLength: 0)
 
-                    Text(inactiveAccountStatusText(account))
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(inactiveAccountStatusColor(account))
+                    HStack(spacing: 6) {
+                        Text(inactiveAccountStatusText(account))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(inactiveAccountStatusColor(account))
+                            .frame(minWidth: 96, alignment: .trailing)
 
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary.opacity(0.76))
-                        .frame(width: 12, height: 12)
-                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                        .animation(.easeInOut(duration: 0.16), value: isExpanded)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary.opacity(0.76))
+                            .frame(width: 12, height: 12)
+                            .fixedSize()
+                    }
+                    .frame(width: 118, alignment: .trailing)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
