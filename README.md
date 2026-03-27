@@ -80,16 +80,6 @@ swift test --disable-sandbox
 - 如果删除的是当前激活账号，会自动切到剩余第一个账号
 - 如果已经没有剩余账号，会清空当前 `auth.json`
 
-## Current Scope
-
-这是一个明确收口的 MVP，只做本地菜单栏管理，不做这些事情：
-
-- 云同步
-- 历史统计
-- 自动切号
-- 复杂设置页
-- 跨平台支持
-
 ## Known Behaviors
 
 - 已经运行中的 Codex CLI 会话不保证立即切到新账号
