@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuBarContentView: View {
     @ObservedObject var viewModel: MenuBarViewModel
     @State private var expandedAccountKey: String?
+    @State private var pendingRemovalAccount: AccountSummary?
 
     var body: some View {
         ZStack {
@@ -19,6 +20,27 @@ struct MenuBarContentView: View {
             }
         }
         .frame(width: 372)
+        .alert(
+            "Remove account?",
+            isPresented: Binding(
+                get: { pendingRemovalAccount != nil },
+                set: { if !$0 { pendingRemovalAccount = nil } }
+            ),
+            presenting: pendingRemovalAccount
+        ) { account in
+            Button("Remove", role: .destructive) {
+                viewModel.removeAccount(account.accountKey)
+                if expandedAccountKey == account.accountKey {
+                    expandedAccountKey = nil
+                }
+                pendingRemovalAccount = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingRemovalAccount = nil
+            }
+        } message: { account in
+            Text("This will log out \(account.displayName) from the local account list.")
+        }
     }
 
     private var background: some View {
@@ -141,26 +163,34 @@ struct MenuBarContentView: View {
     }
 
     private func activeAccountRow(_ account: AccountSummary) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(account.displayName)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.95))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                Text(account.planLabel)
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundStyle(.secondary.opacity(0.84))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(account.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.95))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    Text(account.planLabel)
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.secondary.opacity(0.84))
+                }
+
+                Spacer(minLength: 0)
+
+                Text("Active")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.green.opacity(0.96))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.14), in: Capsule())
             }
 
-            Spacer(minLength: 0)
-
-            Text("Active")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.green.opacity(0.96))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.14), in: Capsule())
+            Button("Logout account") {
+                pendingRemovalAccount = account
+            }
+            .buttonStyle(AccountActionButtonStyle(tint: Color.red.opacity(0.88), background: Color.red.opacity(0.14)))
+            .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 1)
@@ -171,7 +201,11 @@ struct MenuBarContentView: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             Button {
-                expandedAccountKey = isExpanded ? nil : account.accountKey
+                let nextExpandedKey = isExpanded ? nil : account.accountKey
+                expandedAccountKey = nextExpandedKey
+                if nextExpandedKey == account.accountKey {
+                    viewModel.validateAccountAccess(account.accountKey)
+                }
             } label: {
                 HStack(alignment: .center, spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -187,9 +221,9 @@ struct MenuBarContentView: View {
 
                     Spacer(minLength: 0)
 
-                    Text(account.usage != nil ? "Has history" : "No history")
+                    Text(inactiveAccountStatusText(account))
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary.opacity(0.88))
+                        .foregroundStyle(inactiveAccountStatusColor(account))
 
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .semibold))
@@ -216,13 +250,31 @@ struct MenuBarContentView: View {
                             .foregroundStyle(.secondary.opacity(0.85))
                     }
 
-                    Button("Switch to this account") {
-                        viewModel.switchAccount(account.accountKey)
+                    if let accessIssue = account.accessIssue {
+                        Text(accessIssue)
+                            .font(.system(size: 10, weight: .regular))
+                            .foregroundStyle(Color.orange.opacity(0.92))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
+
+                    HStack(spacing: 8) {
+                        Button("Switch account") {
+                            viewModel.switchAccount(account.accountKey)
+                        }
+                        .buttonStyle(
+                            AccountActionButtonStyle(
+                                tint: account.isAccessInvalid ? Color.secondary.opacity(0.72) : Color.white.opacity(0.94),
+                                background: account.isAccessInvalid ? Color.white.opacity(0.08) : Color.white.opacity(0.12)
+                            )
+                        )
+                        .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn || account.isAccessInvalid)
+
+                        Button("Logout account") {
+                            pendingRemovalAccount = account
+                        }
+                        .buttonStyle(AccountActionButtonStyle(tint: Color.red.opacity(0.88), background: Color.red.opacity(0.14)))
+                    }
+                    .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
                 }
             }
         }
@@ -244,8 +296,30 @@ struct MenuBarContentView: View {
                     .foregroundStyle(Color.red.opacity(0.92))
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if case .loaded(let snapshot) = viewModel.state,
+               let accessIssue = snapshot.activeAccessIssue {
+                Text(accessIssue)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(Color.orange.opacity(0.92))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func inactiveAccountStatusText(_ account: AccountSummary) -> String {
+        if account.isAccessInvalid {
+            return "Re-login required"
+        }
+        return account.usage != nil ? "Has history" : "No history"
+    }
+
+    private func inactiveAccountStatusColor(_ account: AccountSummary) -> Color {
+        if account.isAccessInvalid {
+            return Color.red.opacity(0.86)
+        }
+        return .secondary.opacity(0.88)
     }
 
     private var actions: some View {
@@ -255,6 +329,7 @@ struct MenuBarContentView: View {
                     viewModel.cancelLogin()
                 }
                 .disabled(viewModel.isSwitching)
+                .disabled(viewModel.isSwitching || viewModel.isRemoving)
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary.opacity(0.85))
@@ -262,7 +337,7 @@ struct MenuBarContentView: View {
                 Button("Login new account") {
                     viewModel.loginNewAccount()
                 }
-                .disabled(viewModel.isSwitching)
+                .disabled(viewModel.isSwitching || viewModel.isRemoving)
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.white.opacity(0.95))
@@ -273,7 +348,7 @@ struct MenuBarContentView: View {
             Button("Refresh") {
                 viewModel.refresh()
             }
-            .disabled(viewModel.isSwitching || viewModel.isLoggingIn)
+            .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
             .buttonStyle(.plain)
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(.secondary.opacity(0.85))
@@ -367,6 +442,28 @@ private struct UsageMeterCard: View {
     }
 }
 
+private struct AccountActionButtonStyle: ButtonStyle {
+    let tint: Color
+    let background: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(tint.opacity(configuration.role == .destructive ? 0.92 : 1))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(background.opacity(configuration.isPressed ? 0.72 : 1))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+            .contentShape(Capsule())
+    }
+}
+
 private struct UsageBar: View {
     let progress: Double?
     let tint: Color
@@ -386,10 +483,11 @@ private struct UsageBar: View {
                                 endPoint: .trailing
                             )
                         )
-                        .frame(width: min(proxy.size.width * max(0, min(progress, 1)), 138))
+                        .frame(width: proxy.size.width * max(0, min(progress, 1)))
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .frame(height: 4)
     }
 }

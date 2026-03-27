@@ -4,6 +4,7 @@ struct AppSnapshot {
     let accounts: [AccountSummary]
     let activeAccount: AccountSummary?
     let usage: UsageSnapshot?
+    let activeAccessIssue: String?
 }
 
 struct AccountSummary: Identifiable, Equatable {
@@ -14,6 +15,7 @@ struct AccountSummary: Identifiable, Equatable {
     let plan: String
     let isActive: Bool
     let usage: UsageSnapshot?
+    let accessIssue: String?
 
     var displayName: String {
         if !alias.isEmpty {
@@ -24,6 +26,10 @@ struct AccountSummary: Identifiable, Equatable {
 
     var planLabel: String {
         plan.isEmpty ? "Unknown plan" : plan.uppercased()
+    }
+
+    var isAccessInvalid: Bool {
+        accessIssue != nil
     }
 }
 
@@ -153,11 +159,13 @@ enum CodexStoreError: LocalizedError {
 final class CodexDataStore {
     typealias DataReader = (URL) throws -> Data
     typealias SleepAction = (TimeInterval) -> Void
+    typealias UsageAPIClient = (ActiveUsageAuth) throws -> UsageAPIResult
 
     private let paths: CodexPaths
     private let fileManager: FileManager
     private let readData: DataReader
     private let sleepAction: SleepAction
+    private let usageAPIClient: UsageAPIClient
     private let registryReadRetryCount: Int
     private let registryReadRetryDelay: TimeInterval
     private let decoder = JSONDecoder()
@@ -176,6 +184,7 @@ final class CodexDataStore {
         fileManager: FileManager = .default,
         readData: @escaping DataReader = { try Data(contentsOf: $0) },
         sleepAction: @escaping SleepAction = { Thread.sleep(forTimeInterval: $0) },
+        usageAPIClient: @escaping UsageAPIClient = CodexDataStore.fetchUsageFromAPI,
         registryReadRetryCount: Int = 3,
         registryReadRetryDelay: TimeInterval = 0.05
     ) {
@@ -183,26 +192,64 @@ final class CodexDataStore {
         self.fileManager = fileManager
         self.readData = readData
         self.sleepAction = sleepAction
+        self.usageAPIClient = usageAPIClient
         self.registryReadRetryCount = registryReadRetryCount
         self.registryReadRetryDelay = registryReadRetryDelay
     }
 
+    func refreshAccountAccess(accountKey: String) throws {
+        var registry = try loadRegistry()
+        guard let index = registry.accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
+            throw CodexStoreError.invalidActiveAccount
+        }
+
+        let account = registry.accounts[index]
+        let result = try fetchUsageForAccount(account)
+        let nextIssue: String?
+        if let accessIssue = result.accessIssue {
+            nextIssue = accessIssue
+        } else if result.snapshot != nil {
+            nextIssue = nil
+        } else {
+            nextIssue = registry.accounts[index].lastAccessIssue
+        }
+
+        if registry.accounts[index].lastAccessIssue != nextIssue {
+            registry.accounts[index].lastAccessIssue = nextIssue
+            let registryData = try encoder.encode(registry)
+            try writeAtomically(data: registryData, to: paths.registryFile)
+        }
+    }
+
     func loadSnapshot() throws -> AppSnapshot {
         var registry = try loadRegistry()
-        let usage = try resolveUsage(registry: &registry)
+        let usageResolution = try resolveUsage(registry: &registry)
+        let activeAccountKey = registry.activeAccountKey
         let accounts = registry.accounts.map { account in
-            AccountSummary(
+            let accessIssue: String?
+            if account.accountKey == activeAccountKey {
+                accessIssue = usageResolution.accessIssue
+            } else {
+                accessIssue = account.lastAccessIssue
+            }
+            return AccountSummary(
                 id: account.accountKey,
                 accountKey: account.accountKey,
                 email: account.email,
                 alias: account.alias,
                 plan: account.plan,
                 isActive: account.accountKey == registry.activeAccountKey,
-                usage: account.lastUsage
+                usage: account.lastUsage,
+                accessIssue: accessIssue
             )
         }
         let activeAccount = accounts.first(where: \.isActive)
-        return AppSnapshot(accounts: accounts, activeAccount: activeAccount, usage: usage)
+        return AppSnapshot(
+            accounts: accounts,
+            activeAccount: activeAccount,
+            usage: usageResolution.snapshot,
+            activeAccessIssue: usageResolution.accessIssue
+        )
     }
 
     func switchAccount(accountKey: String) throws {
@@ -227,6 +274,81 @@ final class CodexDataStore {
 
         let registryData = try encoder.encode(registry)
         try writeAtomically(data: registryData, to: paths.registryFile)
+    }
+
+    func removeAccount(accountKey: String) throws {
+        var registry = try loadRegistry()
+        guard let removedIndex = registry.accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
+            throw CodexStoreError.invalidActiveAccount
+        }
+
+        let removedAccount = registry.accounts[removedIndex]
+        let remainingAccounts = registry.accounts.enumerated().compactMap { index, account in
+            index == removedIndex ? nil : account
+        }
+        let removedSnapshotURL = paths.accountAuthFile(accountKey: removedAccount.accountKey)
+
+        if removedAccount.accountKey == registry.activeAccountKey {
+            if let nextAccount = remainingAccounts.first {
+                let nextSnapshotURL = paths.accountAuthFile(accountKey: nextAccount.accountKey)
+                guard fileManager.fileExists(atPath: nextSnapshotURL.path) else {
+                    throw CodexStoreError.missingAuthSnapshot(nextAccount.accountKey)
+                }
+
+                let authData = try Data(contentsOf: nextSnapshotURL)
+                try writeAtomically(data: authData, to: paths.authFile)
+                registry.activeAccountKey = nextAccount.accountKey
+                registry.activeAccountActivatedAtMS = Int(Date().timeIntervalSince1970 * 1000)
+            } else {
+                registry.activeAccountKey = ""
+                registry.activeAccountActivatedAtMS = nil
+                if fileManager.fileExists(atPath: paths.authFile.path) {
+                    try fileManager.removeItem(at: paths.authFile)
+                }
+            }
+        }
+
+        registry.accounts = remainingAccounts
+        let registryData = try encoder.encode(registry)
+        try writeAtomically(data: registryData, to: paths.registryFile)
+
+        if fileManager.fileExists(atPath: removedSnapshotURL.path) {
+            try fileManager.removeItem(at: removedSnapshotURL)
+        }
+    }
+
+    func validateAccountAccess(accountKey: String) throws {
+        var registry = try loadRegistry()
+        guard let accountIndex = registry.accounts.firstIndex(where: { $0.accountKey == accountKey }) else {
+            throw CodexStoreError.invalidActiveAccount
+        }
+
+        let account = registry.accounts[accountIndex]
+        guard let auth = try decodeUsageAuth(
+            from: paths.accountAuthFile(accountKey: account.accountKey),
+            fallbackAccountID: account.chatgptAccountID
+        ) else {
+            try cacheAccessIssueIfNeeded(
+                "Account auth missing. Re-login required.",
+                registry: &registry,
+                activeIndex: accountIndex
+            )
+            return
+        }
+
+        let apiResult = try usageAPIClient(auth)
+        if let snapshot = apiResult.snapshot {
+            if account.lastUsage != snapshot {
+                registry.accounts[accountIndex].lastUsage = snapshot
+                registry.accounts[accountIndex].lastUsageAt = Int(Date().timeIntervalSince1970)
+            }
+            try cacheAccessIssueIfNeeded(nil, registry: &registry, activeIndex: accountIndex)
+            return
+        }
+
+        if let accessIssue = apiResult.accessIssue {
+            try cacheAccessIssueIfNeeded(accessIssue, registry: &registry, activeIndex: accountIndex)
+        }
     }
 
     func loadRegistry() throws -> RegistryFile {
@@ -256,26 +378,124 @@ final class CodexDataStore {
         try loadLatestUsageRecord()?.snapshot
     }
 
-    private func resolveUsage(registry: inout RegistryFile) throws -> UsageSnapshot? {
+    private func resolveUsage(registry: inout RegistryFile) throws -> UsageResolution {
         guard let activeIndex = registry.accounts.firstIndex(where: { $0.accountKey == registry.activeAccountKey }) else {
-            return nil
+            return UsageResolution(snapshot: nil, accessIssue: nil)
+        }
+
+        let apiResult = try fetchActiveUsageFromAPI(registry: registry, activeIndex: activeIndex)
+        if let apiUsage = apiResult.snapshot {
+            try cacheUsageIfNeeded(apiUsage, registry: &registry, activeIndex: activeIndex)
+            return UsageResolution(snapshot: apiUsage, accessIssue: nil)
+        }
+
+        if let accessIssue = apiResult.accessIssue {
+            try cacheAccessIssueIfNeeded(accessIssue, registry: &registry, activeIndex: activeIndex)
+            return UsageResolution(
+                snapshot: registry.accounts[activeIndex].lastUsage,
+                accessIssue: accessIssue
+            )
         }
 
         if let latestUsage = try loadLatestUsageRecord(),
            shouldUseLatestUsage(latestUsage, for: registry) {
-            let account = registry.accounts[activeIndex]
-            let rollout = account.lastLocalRollout
-            if account.lastUsage != latestUsage.snapshot || account.lastUsageAt != latestUsage.timestamp {
-                registry.accounts[activeIndex].lastUsage = latestUsage.snapshot
-                registry.accounts[activeIndex].lastUsageAt = latestUsage.timestamp
-                registry.accounts[activeIndex].lastLocalRollout = rollout
-                let registryData = try encoder.encode(registry)
-                try writeAtomically(data: registryData, to: paths.registryFile)
-            }
-            return latestUsage.snapshot
+            try cacheUsageIfNeeded(
+                latestUsage.snapshot,
+                registry: &registry,
+                activeIndex: activeIndex,
+                timestamp: latestUsage.timestamp
+            )
+            try cacheAccessIssueIfNeeded(nil, registry: &registry, activeIndex: activeIndex)
+            return UsageResolution(snapshot: latestUsage.snapshot, accessIssue: nil)
         }
 
-        return registry.accounts[activeIndex].lastUsage
+        try cacheAccessIssueIfNeeded(nil, registry: &registry, activeIndex: activeIndex)
+        return UsageResolution(
+            snapshot: registry.accounts[activeIndex].lastUsage,
+            accessIssue: registry.accounts[activeIndex].lastAccessIssue
+        )
+    }
+
+    private func fetchActiveUsageFromAPI(registry: RegistryFile, activeIndex: Int) throws -> UsageAPIResult {
+        let account = registry.accounts[activeIndex]
+        guard let auth = try loadActiveUsageAuth(for: account) else {
+            return UsageAPIResult(snapshot: nil, accessIssue: "Account auth missing. Re-login required.")
+        }
+        do {
+            return try usageAPIClient(auth)
+        } catch {
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+    }
+
+    private func fetchUsageForAccount(_ account: RegistryAccount) throws -> UsageAPIResult {
+        guard let auth = try loadActiveUsageAuth(for: account) else {
+            return UsageAPIResult(snapshot: nil, accessIssue: "Account auth missing. Re-login required.")
+        }
+
+        do {
+            return try usageAPIClient(auth)
+        } catch {
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+    }
+
+    private func loadActiveUsageAuth(for account: RegistryAccount) throws -> ActiveUsageAuth? {
+        if let currentAuth = try decodeUsageAuth(from: paths.authFile),
+           currentAuth.accountID == account.chatgptAccountID {
+            return currentAuth
+        }
+
+        return try decodeUsageAuth(
+            from: paths.accountAuthFile(accountKey: account.accountKey),
+            fallbackAccountID: account.chatgptAccountID
+        )
+    }
+
+    private func decodeUsageAuth(from url: URL, fallbackAccountID: String? = nil) throws -> ActiveUsageAuth? {
+        let data = try readData(url)
+        let auth = try decoder.decode(AuthFile.self, from: data)
+        guard auth.authMode != "apikey" else {
+            return nil
+        }
+
+        guard let accessToken = auth.tokens?.accessToken,
+              let accountID = auth.tokens?.accountID ?? fallbackAccountID,
+              !accessToken.isEmpty,
+              !accountID.isEmpty else {
+            return nil
+        }
+
+        return ActiveUsageAuth(accessToken: accessToken, accountID: accountID)
+    }
+
+    private func cacheUsageIfNeeded(
+        _ usage: UsageSnapshot,
+        registry: inout RegistryFile,
+        activeIndex: Int,
+        timestamp: Int = Int(Date().timeIntervalSince1970)
+    ) throws {
+        let account = registry.accounts[activeIndex]
+        let rollout = account.lastLocalRollout
+        if account.lastUsage != usage || account.lastUsageAt != timestamp {
+            registry.accounts[activeIndex].lastUsage = usage
+            registry.accounts[activeIndex].lastUsageAt = timestamp
+            registry.accounts[activeIndex].lastLocalRollout = rollout
+            let registryData = try encoder.encode(registry)
+            try writeAtomically(data: registryData, to: paths.registryFile)
+        }
+    }
+
+    private func cacheAccessIssueIfNeeded(
+        _ accessIssue: String?,
+        registry: inout RegistryFile,
+        activeIndex: Int
+    ) throws {
+        if registry.accounts[activeIndex].lastAccessIssue != accessIssue {
+            registry.accounts[activeIndex].lastAccessIssue = accessIssue
+            let registryData = try encoder.encode(registry)
+            try writeAtomically(data: registryData, to: paths.registryFile)
+        }
     }
 
     private func shouldUseLatestUsage(_ usage: UsageRecord, for registry: RegistryFile) -> Bool {
@@ -355,13 +575,81 @@ final class CodexDataStore {
     private func writeAtomically(data: Data, to destination: URL) throws {
         let tempURL = destination.deletingLastPathComponent()
             .appendingPathComponent(".\(destination.lastPathComponent).tmp.\(UUID().uuidString)")
-        try data.write(to: tempURL, options: .completeFileProtectionUnlessOpen)
+        try data.write(to: tempURL)
         if fileManager.fileExists(atPath: destination.path) {
             _ = try fileManager.replaceItemAt(destination, withItemAt: tempURL)
         } else {
             try fileManager.moveItem(at: tempURL, to: destination)
         }
     }
+}
+
+private extension CodexDataStore {
+    static func fetchUsageFromAPI(auth: ActiveUsageAuth) throws -> UsageAPIResult {
+        let endpoint = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+        var request = URLRequest(url: endpoint, timeoutInterval: 5)
+        request.setValue("Bearer \(auth.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(auth.accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+        request.setValue("CodexAuthMacOSBar", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let box = UsageHTTPResultBox()
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            box.data = data
+            box.error = error
+            box.statusCode = (response as? HTTPURLResponse)?.statusCode
+            box.semaphore.signal()
+        }.resume()
+
+        box.semaphore.wait()
+
+        if let responseError = box.error {
+            throw responseError
+        }
+
+        guard let statusCode = box.statusCode else {
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+
+        if (400..<500).contains(statusCode), statusCode != 429 {
+            return UsageAPIResult(snapshot: nil, accessIssue: "Account access invalid. Re-login required.")
+        }
+
+        guard (200..<300).contains(statusCode), let responseData = box.data else {
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+
+        if let responseText = String(data: responseData, encoding: .utf8)?
+            .lowercased(),
+           responseText.contains("not a member")
+            || responseText.contains("workspace")
+            || responseText.contains("forbidden")
+            || responseText.contains("unauthorized")
+            || responseText.contains("access denied") {
+            return UsageAPIResult(snapshot: nil, accessIssue: "Account access invalid. Re-login required.")
+        }
+
+        let decoder = JSONDecoder()
+        let response = try decoder.decode(UsageAPIResponse.self, from: responseData)
+        let snapshot = UsageSnapshot(
+            primary: UsageWindow(response.rateLimit?.primaryWindow),
+            secondary: UsageWindow(response.rateLimit?.secondaryWindow)
+        )
+
+        if snapshot.primary == nil, snapshot.secondary == nil {
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+
+        return UsageAPIResult(snapshot: snapshot, accessIssue: nil)
+    }
+}
+
+private final class UsageHTTPResultBox: @unchecked Sendable {
+    let semaphore = DispatchSemaphore(value: 0)
+    var data: Data?
+    var error: Error?
+    var statusCode: Int?
 }
 
 private func isMissingFileError(_ error: Error) -> Bool {
@@ -375,6 +663,11 @@ private struct UsageRecord {
     let snapshot: UsageSnapshot
     let modifiedAt: Date
     let timestamp: Int
+}
+
+private struct UsageResolution {
+    let snapshot: UsageSnapshot?
+    let accessIssue: String?
 }
 
 private extension UsageWindow {
@@ -426,6 +719,7 @@ struct RegistryAccount: Codable {
     var lastUsage: UsageSnapshot?
     var lastUsageAt: Int?
     var lastLocalRollout: String?
+    var lastAccessIssue: String?
 
     enum CodingKeys: String, CodingKey {
         case accountKey = "account_key"
@@ -440,6 +734,7 @@ struct RegistryAccount: Codable {
         case lastUsage = "last_usage"
         case lastUsageAt = "last_usage_at"
         case lastLocalRollout = "last_local_rollout"
+        case lastAccessIssue = "last_access_issue"
     }
 }
 
@@ -496,5 +791,61 @@ struct RateLimitWindow: Decodable {
     enum CodingKeys: String, CodingKey {
         case usedPercent = "used_percent"
         case resetsAt = "resets_at"
+        case resetAt = "reset_at"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        usedPercent = try container.decode(Double.self, forKey: .usedPercent)
+        resetsAt = try container.decodeIfPresent(Int.self, forKey: .resetsAt)
+            ?? container.decodeIfPresent(Int.self, forKey: .resetAt)
+    }
+}
+
+struct ActiveUsageAuth {
+    let accessToken: String
+    let accountID: String
+}
+
+struct UsageAPIResult {
+    let snapshot: UsageSnapshot?
+    let accessIssue: String?
+}
+
+private struct AuthFile: Decodable {
+    let authMode: String?
+    let tokens: AuthTokens?
+
+    enum CodingKeys: String, CodingKey {
+        case authMode = "auth_mode"
+        case tokens
+    }
+}
+
+private struct AuthTokens: Decodable {
+    let accessToken: String?
+    let accountID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case accountID = "account_id"
+    }
+}
+
+private struct UsageAPIResponse: Decodable {
+    let rateLimit: UsageAPIRateLimit?
+
+    enum CodingKeys: String, CodingKey {
+        case rateLimit = "rate_limit"
+    }
+}
+
+private struct UsageAPIRateLimit: Decodable {
+    let primaryWindow: RateLimitWindow?
+    let secondaryWindow: RateLimitWindow?
+
+    enum CodingKeys: String, CodingKey {
+        case primaryWindow = "primary_window"
+        case secondaryWindow = "secondary_window"
     }
 }

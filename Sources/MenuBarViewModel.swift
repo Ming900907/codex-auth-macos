@@ -11,6 +11,7 @@ final class MenuBarViewModel: ObservableObject {
 
     @Published private(set) var state = AppState.loading
     @Published private(set) var isSwitching = false
+    @Published private(set) var isRemoving = false
     @Published private(set) var isLoggingIn = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var errorMessage: String?
@@ -18,6 +19,8 @@ final class MenuBarViewModel: ObservableObject {
 
     private let loadSnapshotAction: () throws -> AppSnapshot
     private let switchAccountAction: (String) throws -> Void
+    private let removeAccountAction: (String) throws -> Void
+    private let validateAccountAccessAction: (String) throws -> Void
     private let runLoginAction: () async throws -> Void
     private let cancelLoginAction: () -> Void
     private let autoRefreshIntervalNanoseconds: UInt64
@@ -41,6 +44,8 @@ final class MenuBarViewModel: ObservableObject {
     ) {
         loadSnapshotAction = { try store.loadSnapshot() }
         switchAccountAction = { accountKey in try store.switchAccount(accountKey: accountKey) }
+        removeAccountAction = { accountKey in try store.removeAccount(accountKey: accountKey) }
+        validateAccountAccessAction = { accountKey in try store.validateAccountAccess(accountKey: accountKey) }
         runLoginAction = { try await loginRunner.runLogin() }
         cancelLoginAction = { loginRunner.cancelLogin() }
         self.autoRefreshIntervalNanoseconds = autoRefreshIntervalNanoseconds
@@ -54,6 +59,8 @@ final class MenuBarViewModel: ObservableObject {
     init(
         loadSnapshotAction: @escaping () throws -> AppSnapshot,
         switchAccountAction: @escaping (String) throws -> Void,
+        removeAccountAction: @escaping (String) throws -> Void,
+        validateAccountAccessAction: @escaping (String) throws -> Void,
         runLoginAction: @escaping () async throws -> Void,
         cancelLoginAction: @escaping () -> Void,
         autoRefreshIntervalNanoseconds: UInt64 = 300_000_000_000,
@@ -65,6 +72,8 @@ final class MenuBarViewModel: ObservableObject {
     ) {
         self.loadSnapshotAction = loadSnapshotAction
         self.switchAccountAction = switchAccountAction
+        self.removeAccountAction = removeAccountAction
+        self.validateAccountAccessAction = validateAccountAccessAction
         self.runLoginAction = runLoginAction
         self.cancelLoginAction = cancelLoginAction
         self.autoRefreshIntervalNanoseconds = autoRefreshIntervalNanoseconds
@@ -96,7 +105,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     private func refresh(trigger: RefreshTrigger) {
-        if isSwitching || isLoggingIn {
+        if isSwitching || isRemoving || isLoggingIn {
             return
         }
 
@@ -143,7 +152,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func switchAccount(_ accountKey: String) {
-        guard !isSwitching, !isLoggingIn else { return }
+        guard !isSwitching, !isRemoving, !isLoggingIn else { return }
         isSwitching = true
         errorMessage = nil
         statusMessage = nil
@@ -161,8 +170,41 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    func removeAccount(_ accountKey: String) {
+        guard !isSwitching, !isRemoving, !isLoggingIn else { return }
+        isRemoving = true
+        errorMessage = nil
+        statusMessage = nil
+
+        Task {
+            defer { isRemoving = false }
+
+            do {
+                try removeAccountAction(accountKey)
+                let snapshot = try loadSnapshotAction()
+                state = .loaded(snapshot)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func validateAccountAccess(_ accountKey: String) {
+        guard !isSwitching, !isRemoving, !isLoggingIn else { return }
+
+        Task {
+            do {
+                try validateAccountAccessAction(accountKey)
+                let snapshot = try loadSnapshotAction()
+                state = .loaded(snapshot)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     func loginNewAccount() {
-        guard !isSwitching, !isLoggingIn else { return }
+        guard !isSwitching, !isRemoving, !isLoggingIn else { return }
         isLoggingIn = true
         errorMessage = nil
         statusMessage = "codex login started. Finish sign-in in the browser."

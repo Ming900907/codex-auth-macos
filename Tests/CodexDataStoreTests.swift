@@ -6,7 +6,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotReadsActiveAccountAndUsage() throws {
         let fixture = try Fixture.make()
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
 
@@ -20,7 +20,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotIncludesInactiveAccountUsageHistory() throws {
         let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
         let inactiveAccount = try #require(snapshot.accounts.first(where: { !$0.isActive }))
@@ -32,7 +32,7 @@ struct CodexDataStoreTests {
     @Test
     func switchAccountReplacesAuthAndUpdatesRegistry() throws {
         let fixture = try Fixture.make()
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         try store.switchAccount(accountKey: "user-b::acct-b")
 
@@ -56,7 +56,7 @@ struct CodexDataStoreTests {
     @Test
     func loadLatestUsageReturnsNilWithoutTokenCount() throws {
         let fixture = try Fixture.make(includeUsage: false)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         #expect(try store.loadLatestUsage() == nil)
     }
@@ -64,7 +64,7 @@ struct CodexDataStoreTests {
     @Test
     func loadLatestUsageReadsNestedInfoRateLimits() throws {
         let fixture = try Fixture.make(sessionData: Fixture.nestedInfoSessionData)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let usage = try store.loadLatestUsage()
 
@@ -88,7 +88,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotCachesLatestUsageIntoActiveAccount() throws {
         let fixture = try Fixture.make()
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
         let registry = try store.loadRegistry()
@@ -113,11 +113,11 @@ struct CodexDataStoreTests {
         try Data(Fixture.sessionDataDirect.utf8).write(to: olderSessionURL)
         try Data(Fixture.subagentPollutedSessionData.utf8).write(to: subagentSessionURL)
         try Data(Fixture.pollutedSessionData.utf8).write(to: pollutedSessionURL)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: olderSessionURL.path)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 200)], ofItemAtPath: subagentSessionURL.path)
-        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 300)], ofItemAtPath: pollutedSessionURL.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_774_418_800)], ofItemAtPath: olderSessionURL.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_774_578_938)], ofItemAtPath: subagentSessionURL.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_774_578_939)], ofItemAtPath: pollutedSessionURL.path)
 
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
         let registry = try store.loadRegistry()
@@ -132,7 +132,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotFallsBackToAccountHistoryWhenNoNewSessionUsage() throws {
         let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
 
@@ -144,7 +144,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotSupportsNativeRegistryUsageShapeWithoutRemainingPercent() throws {
         let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithNativeStoredUsage)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         let snapshot = try store.loadSnapshot()
 
@@ -158,7 +158,7 @@ struct CodexDataStoreTests {
     @Test
     func loadSnapshotPrefersTargetAccountHistoryAfterSwitchWithoutNewSession() throws {
         let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
-        let store = CodexDataStore(paths: fixture.paths, fileManager: .default)
+        let store = fixture.store()
 
         try store.switchAccount(accountKey: "user-b::acct-b")
         let snapshot = try store.loadSnapshot()
@@ -188,6 +188,7 @@ struct CodexDataStoreTests {
             sleepAction: { _ in
                 sleepCount += 1
             },
+            usageAPIClient: { _ in UsageAPIResult(snapshot: nil, accessIssue: nil) },
             registryReadRetryCount: 3,
             registryReadRetryDelay: 0
         )
@@ -197,6 +198,161 @@ struct CodexDataStoreTests {
         #expect(registry.activeAccountKey == "user-a::acct-a")
         #expect(readCount == 2)
         #expect(sleepCount == 1)
+    }
+
+    @Test
+    func loadSnapshotPrefersRealtimeAPIUsageForActiveAccount() throws {
+        let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
+        var capturedAuth: ActiveUsageAuth?
+        let apiUsage = UsageSnapshot(
+            primary: UsageWindow(usedPercent: 8, remainingPercent: 92, resetAt: Date(timeIntervalSince1970: 1774500000)),
+            secondary: UsageWindow(usedPercent: 12, remainingPercent: 88, resetAt: Date(timeIntervalSince1970: 1775000000))
+        )
+        let store = fixture.store { auth in
+            capturedAuth = auth
+            return UsageAPIResult(snapshot: apiUsage, accessIssue: nil)
+        }
+
+        let snapshot = try store.loadSnapshot()
+        let registry = try store.loadRegistry()
+        let account = try #require(registry.accounts.first(where: { $0.accountKey == "user-a::acct-a" }))
+
+        #expect(capturedAuth?.accountID == "acct-a")
+        #expect(capturedAuth?.accessToken == "test-access-token-a")
+        #expect(snapshot.usage == apiUsage)
+        #expect(account.lastUsage == apiUsage)
+    }
+
+    @Test
+    func loadSnapshotFallsBackToStoredUsageWhenRealtimeAPIRequestFails() throws {
+        let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store { _ in
+            throw URLError(.timedOut)
+        }
+
+        let snapshot = try store.loadSnapshot()
+
+        #expect(snapshot.usage?.primary?.remainingPercent == 58)
+        #expect(snapshot.usage?.secondary?.remainingPercent == 91)
+    }
+
+    @Test
+    func loadSnapshotUsesCurrentAuthContextAfterSwitch() throws {
+        let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
+        let staleAuth = """
+        {"auth_mode":"chatgpt","tokens":{"access_token":"stale-token-b","account_id":"acct-b"}}
+        """
+        let freshAuth = """
+        {"auth_mode":"chatgpt","tokens":{"access_token":"fresh-token-b","account_id":"acct-b"}}
+        """
+        try Data(staleAuth.utf8).write(to: fixture.paths.accountsDirectory.appendingPathComponent("dXNlci1iOjphY2N0LWI.auth.json"))
+        try fixture.store().switchAccount(accountKey: "user-b::acct-b")
+        try Data(freshAuth.utf8).write(to: fixture.paths.authFile)
+
+        var capturedAuth: ActiveUsageAuth?
+        let expectedUsage = UsageSnapshot(
+            primary: UsageWindow(usedPercent: 15, remainingPercent: 85, resetAt: Date(timeIntervalSince1970: 1774600000)),
+            secondary: UsageWindow(usedPercent: 22, remainingPercent: 78, resetAt: Date(timeIntervalSince1970: 1775100000))
+        )
+        let store = fixture.store { auth in
+            capturedAuth = auth
+            return UsageAPIResult(snapshot: expectedUsage, accessIssue: nil)
+        }
+
+        let snapshot = try store.loadSnapshot()
+
+        #expect(snapshot.activeAccount?.accountKey == "user-b::acct-b")
+        #expect(capturedAuth?.accountID == "acct-b")
+        #expect(capturedAuth?.accessToken == "fresh-token-b")
+        #expect(snapshot.usage == expectedUsage)
+    }
+
+    @Test
+    func removeInactiveAccountDeletesSnapshotAndKeepsActiveAccount() throws {
+        let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store()
+
+        try store.removeAccount(accountKey: "user-b::acct-b")
+
+        let registry = try store.loadRegistry()
+        #expect(registry.activeAccountKey == "user-a::acct-a")
+        #expect(registry.accounts.count == 1)
+        #expect(registry.accounts.first?.accountKey == "user-a::acct-a")
+        #expect(FileManager.default.fileExists(atPath: fixture.paths.accountAuthFile(accountKey: "user-b::acct-b").path) == false)
+    }
+
+    @Test
+    func removeActiveAccountSwitchesToRemainingAccount() throws {
+        let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store()
+
+        try store.removeAccount(accountKey: "user-a::acct-a")
+
+        let registry = try store.loadRegistry()
+        let authContent = try String(contentsOf: fixture.paths.authFile, encoding: .utf8)
+        #expect(registry.activeAccountKey == "user-b::acct-b")
+        #expect(registry.accounts.count == 1)
+        #expect(authContent.contains("\"account_id\":\"acct-b\""))
+    }
+
+    @Test
+    func removeLastAccountClearsAuthFileAndActiveAccount() throws {
+        let fixture = try Fixture.make(registryData: Fixture.registryDataSingleAccount)
+        let store = fixture.store()
+
+        try store.removeAccount(accountKey: "user-a::acct-a")
+
+        let registry = try store.loadRegistry()
+        #expect(registry.accounts.isEmpty)
+        #expect(registry.activeAccountKey.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: fixture.paths.authFile.path) == false)
+    }
+
+    @Test
+    func validateInactiveAccountAccessMarksAccountAsInvalid() throws {
+        let fixture = try Fixture.make(registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store { auth in
+            if auth.accountID == "acct-b" {
+                return UsageAPIResult(snapshot: nil, accessIssue: "Account access invalid. Re-login required.")
+            }
+            return UsageAPIResult(snapshot: nil, accessIssue: nil)
+        }
+
+        try store.validateAccountAccess(accountKey: "user-b::acct-b")
+        let snapshot = try store.loadSnapshot()
+        let inactiveAccount = try #require(snapshot.accounts.first(where: { $0.accountKey == "user-b::acct-b" }))
+
+        #expect(inactiveAccount.isAccessInvalid == true)
+        #expect(inactiveAccount.accessIssue == "Account access invalid. Re-login required.")
+    }
+
+    @Test
+    func loadSnapshotMarksAccountAsInvalidWhenUsageAPIRejectsAccess() throws {
+        let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store { _ in
+            UsageAPIResult(snapshot: nil, accessIssue: "Account access invalid. Re-login required.")
+        }
+
+        let snapshot = try store.loadSnapshot()
+        let registry = try store.loadRegistry()
+
+        #expect(snapshot.activeAccessIssue == "Account access invalid. Re-login required.")
+        #expect(snapshot.activeAccount?.accessIssue == "Account access invalid. Re-login required.")
+        #expect(registry.accounts.first(where: { $0.accountKey == "user-a::acct-a" })?.lastAccessIssue == "Account access invalid. Re-login required.")
+        #expect(snapshot.usage?.primary?.remainingPercent == 58)
+    }
+
+    @Test
+    func loadSnapshotMarksAccountAsInvalidForOtherClientErrors() throws {
+        let fixture = try Fixture.make(includeUsage: false, registryData: Fixture.registryDataWithStoredUsage)
+        let store = fixture.store { _ in
+            UsageAPIResult(snapshot: nil, accessIssue: "Account access invalid. Re-login required.")
+        }
+
+        let snapshot = try store.loadSnapshot()
+
+        #expect(snapshot.activeAccount?.isAccessInvalid == true)
+        #expect(snapshot.activeAccessIssue == "Account access invalid. Re-login required.")
     }
 }
 
@@ -217,9 +373,9 @@ private struct Fixture {
         try FileManager.default.createDirectory(at: paths.sessionsDirectory.appendingPathComponent("2026/03/25"), withIntermediateDirectories: true)
 
         try registryData.write(to: paths.registryFile)
-        try Data("{\"tokens\":{\"account_id\":\"acct-a\"}}".utf8).write(to: paths.authFile)
-        try Data("{\"tokens\":{\"account_id\":\"acct-a\"}}".utf8).write(to: paths.accountsDirectory.appendingPathComponent("dXNlci1hOjphY2N0LWE.auth.json"))
-        try Data("{\"tokens\":{\"account_id\":\"acct-b\"}}".utf8).write(to: paths.accountsDirectory.appendingPathComponent("dXNlci1iOjphY2N0LWI.auth.json"))
+        try Data(authFileDataA.utf8).write(to: paths.authFile)
+        try Data(authFileDataA.utf8).write(to: paths.accountsDirectory.appendingPathComponent("dXNlci1hOjphY2N0LWE.auth.json"))
+        try Data(authFileDataB.utf8).write(to: paths.accountsDirectory.appendingPathComponent("dXNlci1iOjphY2N0LWI.auth.json"))
 
         if includeUsage {
             let sessionURL = paths.sessionsDirectory
@@ -228,6 +384,14 @@ private struct Fixture {
         }
 
         return Fixture(root: root, paths: paths)
+    }
+
+    func store(usageAPIClient: @escaping CodexDataStore.UsageAPIClient = { _ in UsageAPIResult(snapshot: nil, accessIssue: nil) }) -> CodexDataStore {
+        CodexDataStore(
+            paths: paths,
+            fileManager: .default,
+            usageAPIClient: usageAPIClient
+        )
     }
 
     private static let registryDataDefault = Data("""
@@ -367,6 +531,27 @@ private struct Fixture {
     }
     """.utf8)
 
+    static let registryDataSingleAccount = Data("""
+    {
+      "schema_version": 3,
+      "active_account_key": "user-a::acct-a",
+      "active_account_activated_at_ms": 1774417805900,
+      "accounts": [
+        {
+          "account_key": "user-a::acct-a",
+          "chatgpt_account_id": "acct-a",
+          "chatgpt_user_id": "user-a",
+          "email": "main@example.com",
+          "alias": "",
+          "plan": "plus",
+          "auth_mode": "chatgpt",
+          "created_at": 1774417805,
+          "last_used_at": 1774417805
+        }
+      ]
+    }
+    """.utf8)
+
     static let sessionDataDirect = """
     {"timestamp":"2026-03-25T06:32:54.896Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":27.0,"resets_at":1774435835},"secondary":{"used_percent":11.0,"resets_at":1774937466}}}}
     """
@@ -383,6 +568,14 @@ private struct Fixture {
 
     static let nestedInfoSessionData = """
     {"timestamp":"2026-03-25T06:32:54.896Z","type":"event_msg","payload":{"type":"token_count","info":{"rate_limits":{"primary":{"used_percent":36.0,"resets_at":1774435835},"secondary":{"used_percent":7.0,"resets_at":1774937466}}}}}
+    """
+
+    static let authFileDataA = """
+    {"auth_mode":"chatgpt","tokens":{"access_token":"test-access-token-a","account_id":"acct-a"}}
+    """
+
+    static let authFileDataB = """
+    {"auth_mode":"chatgpt","tokens":{"access_token":"test-access-token-b","account_id":"acct-b"}}
     """
 
     static let sourceRootPath = URL(fileURLWithPath: #filePath)
