@@ -20,27 +20,6 @@ struct MenuBarContentView: View {
             }
         }
         .frame(width: 372)
-        .alert(
-            "Remove account?",
-            isPresented: Binding(
-                get: { pendingRemovalAccount != nil },
-                set: { if !$0 { pendingRemovalAccount = nil } }
-            ),
-            presenting: pendingRemovalAccount
-        ) { account in
-            Button("Remove", role: .destructive) {
-                viewModel.removeAccount(account.accountKey)
-                if expandedAccountKey == account.accountKey {
-                    expandedAccountKey = nil
-                }
-                pendingRemovalAccount = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingRemovalAccount = nil
-            }
-        } message: { account in
-            Text("This will log out \(account.displayName) from the local account list.")
-        }
     }
 
     private var background: some View {
@@ -191,6 +170,10 @@ struct MenuBarContentView: View {
             }
             .buttonStyle(AccountActionButtonStyle(tint: Color.red.opacity(0.88), background: Color.red.opacity(0.14)))
             .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
+
+            if pendingRemovalAccount?.accountKey == account.accountKey {
+                removalConfirmation(account)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 1)
@@ -278,10 +261,56 @@ struct MenuBarContentView: View {
                         .buttonStyle(AccountActionButtonStyle(tint: Color.red.opacity(0.88), background: Color.red.opacity(0.14)))
                     }
                     .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
+
+                    if pendingRemovalAccount?.accountKey == account.accountKey {
+                        removalConfirmation(account)
+                    }
                 }
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private func removalConfirmation(_ account: AccountSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Remove \(account.displayName) from the local account list?")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.94))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("This only removes the local account snapshot on this Mac.")
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(.secondary.opacity(0.84))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button("Remove", role: .destructive) {
+                    confirmRemoval(of: account)
+                }
+                .buttonStyle(AccountActionButtonStyle(tint: Color.red.opacity(0.92), background: Color.red.opacity(0.18)))
+                .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
+
+                Button("Cancel") {
+                    pendingRemovalAccount = nil
+                }
+                .buttonStyle(AccountActionButtonStyle(tint: Color.white.opacity(0.9), background: Color.white.opacity(0.10)))
+                .disabled(viewModel.isSwitching || viewModel.isRemoving || viewModel.isLoggingIn)
+            }
+        }
+        .padding(10)
+        .background(Color.red.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.red.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private func confirmRemoval(of account: AccountSummary) {
+        viewModel.removeAccount(account.accountKey)
+        if expandedAccountKey == account.accountKey {
+            expandedAccountKey = nil
+        }
+        pendingRemovalAccount = nil
     }
 
     private var statusSection: some View {

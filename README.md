@@ -25,8 +25,8 @@
 
 从 Release 下载最新 zip：
 
-- Release: `https://github.com/Ming900907/codex-auth-macos/releases/tag/v0.1.0`
-- Asset: `https://github.com/Ming900907/codex-auth-macos/releases/download/v0.1.0/CodexAuthMacOSBar.app.zip`
+- Release: `https://github.com/Ming900907/codex-auth-macos/releases/tag/v0.1.1`
+- Asset: `https://github.com/Ming900907/codex-auth-macos/releases/download/v0.1.1/CodexAuthMacOSBar.app.zip`
 
 解压后得到 `CodexAuthMacOSBar.app`，直接运行即可。
 

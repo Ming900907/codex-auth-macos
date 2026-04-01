@@ -1,12 +1,14 @@
 import Foundation
 import Testing
+
 @testable import CodexAuthMacOSBar
 
 @MainActor
 struct MenuBarViewModelTests {
     @Test
     func loginSuccessClearsRefreshingStatusAfterRefreshCompletes() async {
-        let snapshot = makeSnapshot(accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
+        let snapshot = makeSnapshot(
+            accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
         var loadSnapshotCallCount = 0
         let viewModel = MenuBarViewModel(
             loadSnapshotAction: {
@@ -44,7 +46,8 @@ struct MenuBarViewModelTests {
 
     @Test
     func loginSuccessRetriesUntilNewAccountAppears() async {
-        let originalSnapshot = makeSnapshot(accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
+        let originalSnapshot = makeSnapshot(
+            accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
         let updatedSnapshot = makeSnapshot(
             accountKeys: ["user-a::acct-a", "user-b::acct-b"],
             activeAccountKey: "user-a::acct-a"
@@ -88,7 +91,9 @@ struct MenuBarViewModelTests {
 
         switch viewModel.state {
         case .loaded(let loadedSnapshot):
-            #expect(Set(loadedSnapshot.accounts.map { $0.accountKey }) == Set(["user-a::acct-a", "user-b::acct-b"]))
+            #expect(
+                Set(loadedSnapshot.accounts.map { $0.accountKey })
+                    == Set(["user-a::acct-a", "user-b::acct-b"]))
         case .loading, .failed:
             Issue.record("expected updated account list after login retry")
         }
@@ -96,7 +101,8 @@ struct MenuBarViewModelTests {
 
     @Test
     func manualRefreshShowsLoadingOverlayUntilSnapshotArrives() async {
-        let snapshot = makeSnapshot(accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
+        let snapshot = makeSnapshot(
+            accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
         var loadSnapshotCallCount = 0
         let viewModel = MenuBarViewModel(
             loadSnapshotAction: {
@@ -140,7 +146,8 @@ struct MenuBarViewModelTests {
             accountKeys: ["user-a::acct-a", "user-b::acct-b"],
             activeAccountKey: "user-a::acct-a"
         )
-        let updatedSnapshot = makeSnapshot(accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
+        let updatedSnapshot = makeSnapshot(
+            accountKeys: ["user-a::acct-a"], activeAccountKey: "user-a::acct-a")
         var loadSnapshotCallCount = 0
         var removedAccountKey: String?
 
@@ -179,6 +186,53 @@ struct MenuBarViewModelTests {
     }
 
     @Test
+    func removeActiveAccountRefreshesSnapshotAfterDeletion() async {
+        let initialSnapshot = makeSnapshot(
+            accountKeys: ["user-a::acct-a", "user-b::acct-b"],
+            activeAccountKey: "user-a::acct-a"
+        )
+        let updatedSnapshot = makeSnapshot(
+            accountKeys: ["user-b::acct-b"],
+            activeAccountKey: "user-b::acct-b"
+        )
+        var loadSnapshotCallCount = 0
+        var removedAccountKey: String?
+
+        let viewModel = MenuBarViewModel(
+            loadSnapshotAction: {
+                defer { loadSnapshotCallCount += 1 }
+                return loadSnapshotCallCount == 0 ? initialSnapshot : updatedSnapshot
+            },
+            switchAccountAction: { _ in },
+            removeAccountAction: { accountKey in
+                removedAccountKey = accountKey
+            },
+            validateAccountAccessAction: { _ in },
+            runLoginAction: { () async throws in },
+            cancelLoginAction: {},
+            autoRefreshIntervalNanoseconds: 3_600_000_000_000,
+            loginRefreshRetryCount: 1,
+            loginRefreshRetryIntervalNanoseconds: 0,
+            sleepAction: { _ in }
+        )
+
+        await waitUntil { if case .loaded = viewModel.state { true } else { false } }
+
+        viewModel.removeAccount("user-a::acct-a")
+
+        await waitUntil { !viewModel.isRemoving }
+        await waitUntil {
+            if case .loaded(let snapshot) = viewModel.state {
+                return snapshot.activeAccount?.accountKey == "user-b::acct-b"
+            }
+            return false
+        }
+
+        #expect(removedAccountKey == "user-a::acct-a")
+        #expect(loadSnapshotCallCount >= 2)
+    }
+
+    @Test
     func validateInactiveAccountAccessRefreshesSnapshot() async {
         let initialSnapshot = makeSnapshot(
             accountKeys: ["user-a::acct-a", "user-b::acct-b"],
@@ -205,7 +259,7 @@ struct MenuBarViewModelTests {
                     isActive: false,
                     usage: nil,
                     accessIssue: "Account access invalid. Re-login required."
-                )
+                ),
             ],
             activeAccount: AccountSummary(
                 id: "user-a::acct-a",
@@ -247,7 +301,8 @@ struct MenuBarViewModelTests {
 
         await waitUntil {
             if case .loaded(let snapshot) = viewModel.state {
-                return snapshot.accounts.first(where: { $0.accountKey == "user-b::acct-b" })?.isAccessInvalid == true
+                return snapshot.accounts.first(where: { $0.accountKey == "user-b::acct-b" })?
+                    .isAccessInvalid == true
             }
             return false
         }
@@ -279,7 +334,7 @@ struct MenuBarViewModelTests {
                     isActive: false,
                     usage: nil,
                     accessIssue: "Account access invalid. Re-login required."
-                )
+                ),
             ],
             activeAccount: AccountSummary(
                 id: "user-a::acct-a",
@@ -300,7 +355,7 @@ struct MenuBarViewModelTests {
             loadSnapshotAction: { invalidSnapshot },
             switchAccountAction: { _ in },
             removeAccountAction: { _ in },
-            validateAccountAccessAction: {
+            validateAccountAccessAction: { _ in
                 validateCallCount += 1
             },
             runLoginAction: { () async throws in },
